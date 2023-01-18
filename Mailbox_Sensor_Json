@@ -1,0 +1,124 @@
+
+// Original Code from "PricelessToolkit" https://github.com/PricelessToolkit/LoraMailboxSensor-2.0
+
+#include <SPI.h>
+#include <LoRa.h>
+#include <ArduinoJson.h>     
+#include <ArduinoUniqueID.h> //Derives a (semi)UniqueID from processors Serial Number. Used for Node-ID.
+#include <LowPower.h>        //Rocket Screams' low power mode for ATmega328p. Used if CPU is running for too long.
+
+#define JSON_MSG_BUFFER    256  //JSON working memory.
+String node_id = String("ID") + "010442";  //This mimic's LoRa Soil Sensor, but this node_id  will be overwritten by UniqueID.
+char node_id_Buffer[32];
+
+int loopcounter = 0;
+  
+void setup() {
+  char *p = &node_id_Buffer[0];
+  pinMode(3, OUTPUT);
+  digitalWrite(3, HIGH);
+  
+  analogReference(INTERNAL);  //A0 is relative to 1.1 volts on ATmega328P
+ 
+  Serial.begin(9600);
+  while (!Serial);
+  Serial.println("Setting Up the Mailbox Sensor");
+  Serial.print("  ");  
+  UniqueIDdump(Serial); //Ex. of this: "UniqueID: 58 48 DF 31 DF 39 FF 13 04"
+ 
+  //The following will format the UniqueID into string: "58FFDFFFDFFFFFFFFF"
+  //  for printing to serial port and for building a JSON memory buffer to hold this UniqueID.
+  for (size_t i = 0; i < UniqueIDsize; i++)
+  {
+#ifdef DEBUG    
+    if (UniqueID[i] < 0x10)
+      Serial.print("0");
+    Serial.print(UniqueID[i], HEX); 
+#endif    
+    sprintf(p, "%02X", UniqueID[i]);  
+    p += 2;                           // advance char pointer
+  }
+
+//sprintf(node_id_Buffer,"%02x%02x%02x",UniqueID[0],UniqueID[1],UniqueID[2]);  //use if you want to limit the UniqueID length.  
+
+#ifdef DEBUG   
+  Serial.println();
+  Serial.println(node_id_Buffer);  //print the UniqueID formatted for use by JSON.
+#endif
+  
+  Serial.println("  Setting Up LoRa Radio");
+  if (!LoRa.begin(915E6)) {                         // frequency in Hz (ASIA 433E6, EU 868E6, US 915E6)
+    Serial.println("    LoRaError");
+    while (1);
+  }
+//LoRa.dumpRegisters(Serial);
+//LoRa.setSignalBandwidth(Bandwidth);         // signal bandwidth in Hz, defaults to 125E3
+//LoRa.setSpreadingFactor(8);                 // ranges from 6-12,default 7 see API docs
+//LoRa.setCodingRate4(codingRate);            // codingRate defaults to 5
+
+//LoRa.setSyncWord(0xF3);                     // Original PTK setting as the sync word
+//LoRa.setSyncWord(0x54);                     // Changed to follow rules: nibbles between 1-7 and different.
+  LoRa.setSyncWord(0x12);                     // The default is 0x12 anyway. For private networks.
+  LoRa.enableCrc();                           // Enable CRC usage, by default a CRC is not used
+  LoRa.setTxPower(20);                        // TX power in dB, defaults to 17, Supported values are 2 to 20
+
+}
+
+
+void loop() {
+//DynamicJsonDocument root(JSON_MSG_BUFFER);
+  StaticJsonDocument<JSON_MSG_BUFFER> root;  //memory should be freed after each loop iteration.
+ //String jsonoutput = "";
+  char jsonoutput[JSON_MSG_BUFFER];  
+
+  int raw = analogRead(A0);  //tlong - I find initial reading is too high
+  delay(20);                 //  but is OK if read again after 20ms
+
+//Serial.println(raw);
+//float volts = (analogRead(A0)*1.1/1024.0) * (100+20)/20; // Resistors R6 (100k) and R7 (20k)
+  float volts = (analogRead(A0)*1.1/1023.0) * (100+20)/20; //Change - A0 range is 0 to 1023. 1023 is highest reading of ref 1.1V
+  volts = volts - 0.34;  //Correction Factor 0.34 FOR THIS BOARD. CHANGE FOR YOUR BOARD. Based on measured values of Vbatt at: 3.7,3.3,3.0,2.75VDC.
+                         //Alternatively, measure the resistance of the resistors R6 and R7 with a multimeter and change value in the code.
+                         
+  if (loopcounter < 2){
+    Serial.println("Send Mailbox packet");
+    node_id = node_id_Buffer;    //Comment this out if you want to use node_id from above.
+    root["node_id"] = node_id;
+    root["state"] = "ON";
+  //root["battery_level"] = (String)volts;
+    root["battery_level"] = volts;   //Do as a float instead of a string.
+    serializeJson(root, jsonoutput);
+    
+    LoRa.beginPacket();
+  //LoRa.print("0xA2B2");  // Original PTK. Your MailBox key here 
+  //LoRa.print("{\"state\":\"ON\",\"battery_level\":3.7}"); //Test LoRa Payload.
+    LoRa.print(jsonoutput);
+    LoRa.endPacket();
+    Serial.print("  Battery Level(Volts): ");
+    Serial.println(volts);   
+    delay(500);
+   }
+
+//Original code that determine the level for low battery declaration. Battery level now sent to HA. HA will determine low level.
+//if (volts < 3.2 and loopcounter == 1 ){
+//  Serial.println("Send Low battery packet");
+//  LoRa.beginPacket();
+//  LoRa.print("0xA3B3");   //  Your low Battery key here     
+//  LoRa.endPacket();
+//}
+
+  if(loopcounter > 2){
+    digitalWrite(3, LOW); // Sets the digital pin 3 LOW For power cut off. For testing set pin HIGH
+  //Serial.println("Keep Running"); //Use to test pin3 staying high.
+  //loopcounter = 10; //stop loopcounter. I find if CPU still runs after several minutes, packets are sent out near continuously.
+    if(loopcounter > 1000){
+      Serial.println("Active Too Long!! Going to sleep. ");
+      LoRa.sleep();  //Put radio module in low power mode
+      delay(100); //delay long enough for serial print
+      LowPower.powerDown(SLEEP_FOREVER, ADC_OFF, BOD_OFF);
+    }
+  }
+
+  loopcounter ++;
+//delay(20);  //moved delay to beginning for more accurate analog read.
+}
